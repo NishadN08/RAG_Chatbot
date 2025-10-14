@@ -24,11 +24,8 @@ from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
 # Chains / prompts
 from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
 from langchain.chains import LLMChain
 from langchain.chains import ConversationalRetrievalChain, StuffDocumentsChain
-
-from langchain.retrievers import EnsembleRetriever
 
 # =========================
 # Config
@@ -41,10 +38,10 @@ MEMORY_PERSIST_DIR = "./chroma_memory_db"
 MEMORY_COLLECTION = "chat_memory"
 
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-OLLAMA_MODEL = "qwen2.5:72b"
+OLLAMA_MODEL = "gpt-oss:20b"
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 150
+CHUNK_SIZE = 1500
+CHUNK_OVERLAP = 50
 
 SHOW_TOPK_IN_CONTEXT = 5        # from the retriever (what the LLM actually saw)
 PREVIEW_CHARS = 4000  
@@ -68,6 +65,9 @@ def clean_text_block(text: str) -> str:
 
     # Collapse repeated words/emails/URLs inline
     text = re.sub(r"\b(\S+)( \1)+\b", r"\1", text)
+
+    # Remove all newlines and collapse multiple spaces
+    text = re.sub(r"\s+", " ", text).strip()
 
 
     # Deduplicate lines while keeping order
@@ -141,22 +141,32 @@ def assert_all_metadata_primitive(docs: list[Document]) -> None:
             if not isinstance(v, ALLOWED_META_TYPES):
                 raise ValueError(f"Non-primitive metadata at doc #{i}, key '{k}': {type(v)} -> {v!r}")
 
+def format_chunks(docs: list, max_items, max_chars):
+    """
+    Convert retrieved chunks into JSON-friendly format.
+    """
+    retrieved_chunks = []
+    if not docs:
+        return [{"title": "[none]", "url": "", "snippet": ""}]
 
-def sources(source_docs: list[Document]) -> str:
-    lines = []
-    seen = set()
-    for i, d in enumerate(source_docs, 1):
-        src = d.metadata.get("source", "")
-        title = d.metadata.get("title", "")
-        key = (src, title)
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(f"{i}. {title or '[No Title]'}\n   {src}")
-    return "\n".join(lines) if lines else "No sources returned."
+    for i, d in enumerate(docs[:max_items], 1):
+        meta = d.metadata or {}
+        title = meta.get("title", "") or "[No Title]"
+        url = meta.get("source", "") or ""
+        snippet = (d.page_content or "").replace("\n", " ").strip()
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars] + " ..."
 
-def print_chunks(label: str, docs: list[Document], max_items: int = 5, max_chars: int = 500):
-    print(f"\n----- {label} (showing up to {max_items}) -----")
+        retrieved_chunks.append({
+            "id": i,
+            "title": title,
+            "url": url,
+            "snippet": snippet
+        })
+    return retrieved_chunks
+
+
+def print_chunks(label: str, docs: list[Document], max_items: int = 10, max_chars: int = 5000):
     if not docs:
         print("[none]")
         return
@@ -170,50 +180,6 @@ def print_chunks(label: str, docs: list[Document], max_items: int = 5, max_chars
         print(f"\n[{i}] {title}\nURL: {url}\n---\n{snippet}")
 
 
-def chunks_to_txt(chunks, file_path="retrieved_chunks.txt", max_chunks=None, max_chunk_chars=10000):
-    with open(file_path, "w", encoding="utf-8") as f:
-        for i, chunk in enumerate(chunks):
-            if max_chunks and i >= max_chunks:
-                break
-            title = chunk.metadata.get("title", "[No Title]")
-            source = chunk.metadata.get("source", "[No Source]")
-            text = chunk.page_content
-            if len(text) > max_chunk_chars:
-                text = text[:max_chunk_chars] + " ..."
-            f.write(f"[{i+1}] Title: {title}\n")
-            f.write(f"Source: {source}\n")
-            f.write(f"Text:\n{text}\n")
-            f.write("-" * 80 + "\n")
-    print(f"Retrieved chunks saved to: {file_path}")
-
-def save_chunks_to_txt(chunks: list[Document], file_path: str = "chunks.txt"):
-    """
-    Save each chunk's text (and optionally metadata) to a TXT file.
-    
-    Args:
-        chunks: List of Document objects.
-        file_path: Path to save the TXT file.
-    """
-    with open(file_path, "w", encoding="utf-8") as f:
-        for i, chunk in enumerate(chunks, 1):
-            f.write(f"----- Chunk {i} -----\n")
-            title = chunk.metadata.get("title", "[No Title]")
-            source = chunk.metadata.get("source", "[No Source]")
-            f.write(f"Title: {title}\n")
-            f.write(f"Source: {source}\n")
-            f.write(f"Text:\n{chunk.page_content}\n")
-            f.write("\n\n")
-    print(f"Saved {len(chunks)} chunks to {file_path}")
-
-def dedupe_chunks(chunks):
-    seen = set()
-    unique_chunks = []
-    for c in chunks:
-        text = c.page_content.strip()
-        if text not in seen:
-            seen.add(text)
-            unique_chunks.append(c)
-    return unique_chunks    
 
 # =========================
 # 1) Load JSONL
@@ -232,9 +198,6 @@ splitter = RecursiveCharacterTextSplitter(
 chunks = splitter.split_documents(docs)
 print(f"Total number of chunks before sanitize: {len(chunks)}")
 
-chunks = dedupe_chunks(chunks)
-print(f"Total number of chunks after dedupe: {len(chunks)}")
-
 
 # Sanitize metadata for Chroma (turn lists → strings, drop noisy fields)
 chunks = [sanitize_metadata(c) for c in chunks]
@@ -245,25 +208,9 @@ chunks = filter_complex_metadata(chunks)
 # Validate (will raise if anything non-primitive sneaks in)
 assert_all_metadata_primitive(chunks)
 
-print(f"Total number of chunks after sanitize:  {len(chunks)}")
-if chunks:
-    print("Sample chunk metadata:", chunks[0].metadata)
-save_chunks_to_txt(chunks, "all_chunks.txt")
-
-
-# =========================
-# Memory Store
-# =========================
-def store_chat_in_memory(question: str, answer: str):
-    doc_text = f"Human Message: {question}\nAI Message: {answer}"
-    doc = Document(page_content=doc_text, metadata={"type": "chat_history"})
-    memory_vectorstore.add_documents([doc])
-    memory_vectorstore.persist()
-
-
-# =========================
+# ==================================
 # 3) Embeddings + Chroma (persist)
-# =========================
+# ===================================
 embedding_model = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
 
 # If you want a clean rebuild each run, uncomment:
@@ -289,23 +236,33 @@ memory_vectorstore = Chroma(
 )
 
 # =========================
-# Hybrid Retriever (Vector + BM25)
+# 4) Memory Store
 # =========================
+def store_chat_in_memory(question: str, answer: str):
+    doc_text = f"Human Message: {question}\nAI Message: {answer}"
+    doc = Document(page_content=doc_text, metadata={"type": "chat_history"})
+    memory_vectorstore.add_documents([doc])
+    memory_vectorstore.persist()
+
+
+# ======================================
+# 5) Hybrid Retriever (Vector + BM25)
+# ======================================
 
 # Vector retriever (semantic similarity only)
 vector_retriever = vectorstore.as_retriever(
     search_type="similarity",
-    search_kwargs={"k": 20},  # tune k (10 works well for names)
+    search_kwargs={"k": 2000},  # tune k (10 works well for names)
 )
 
 # BM25 retriever (keyword-based)
 bm25_retriever = BM25Retriever.from_documents(chunks)
-bm25_retriever.k = 20
+bm25_retriever.k = 2000
 
 # Combine them
 hybrid_retriever = EnsembleRetriever(
     retrievers=[vector_retriever, bm25_retriever],
-    weights=[0.7, 0.3]  # 70% vector + 30% keyword
+    weights=[0.8, 0.2]  # 70% vector + 30% keyword
     
 )
 
@@ -313,7 +270,7 @@ hybrid_retriever = EnsembleRetriever(
 cross_encoder = HuggingFaceCrossEncoder(model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # Wrap in LangChain's CrossEncoderReranker
-compressor = CrossEncoderReranker(model=cross_encoder)
+compressor = CrossEncoderReranker(model=cross_encoder, top_n =10)
 
 
 # Final retriever with reranking
@@ -322,9 +279,9 @@ retriever = ContextualCompressionRetriever(
     base_compressor=compressor,
     k=10  # keep top-5 chunks after reranking
 )
-# =========================
-# Memory Retriever (Hybrid + Memory)
-# =========================
+# ==============================================
+# 6) Memory Retriever (Hybrid + Memory)
+# ==============================================
 
 # Create memory retriever
 memory_retriever = memory_vectorstore.as_retriever(
@@ -338,23 +295,19 @@ combined_retriever = EnsembleRetriever(
 )
 
 # =========================
-# 4) LLM (Ollama)
+# 7) LLM (Ollama)
 # =========================
 llm = Ollama(model=OLLAMA_MODEL)
 
-# =========================
-# 5) Prompt + doc_chain
-# =========================
+# ==================================
+# 8) Main Prompt + doc_chain
+# ==================================
 custom_prompt = PromptTemplate(
     input_variables=["context", "question"],
     template=(
         "You are a helpful assistant.\n"
-        # "Conversation so far:\n{chat_history}\n\n"
-        # "Use ONLY the information provided below to answer the question.\n"
         "Use the following pieces of retrived context to answer the question\n"
         "If asked about a person give some more information on the person\n"
-        # "If the new question depends on previous ones, use both history and info.\n"
-        # "If unrelated, ignore history and answer only with the given info.\n\n"
         "Provide the answer DIRECTLY. If the answer is not present, reply ONLY with: Not available in the document\n"
         "Information:\n{context}\n\nQuestion: {question}\n\nAnswer:"
     ),
@@ -367,9 +320,9 @@ combine_docs_chain = StuffDocumentsChain(
 
 )
 
-# =========================
-# 5) Memory Prompt + QA chain
-# =========================
+# ==================================================
+# 9) Standalone Question Prompt + QA chain
+# ==================================================
 
 condense_prompt = PromptTemplate(
     input_variables=["chat_history", "question"],
