@@ -428,29 +428,6 @@ def pick_main_container(soup: BeautifulSoup) -> Tag:
     return soup.new_tag("div")
 
 
-# def extract_body_text(node: Tag) -> str:
-#     """
-#     Extract visible textual blocks from the container node, keeping a number of
-#     block-level tags (headings, paragraphs, list items, table cells, code blocks).
-#     Returns plain text with newlines between blocks.
-#     """
-#     if not isinstance(node, Tag):
-#         return ""
-#     parts = []
-#     for sel in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "tbody", "thead", "td", "th", "pre", "code"]:
-#         try:
-#             iter_els = node.select(sel)
-#         except Exception:
-#             iter_els = []
-#         for el in iter_els:
-#             if not isinstance(el, Tag):
-#                 continue
-#             t = clean_text(el.get_text(separator=" ", strip=True))
-#             if t:
-#                 parts.append(t)
-#     return "\n".join(parts).strip()
-
-
 def is_valid_link(href: str) -> bool:
     """
     Lightweight filter that keeps full http(s) links while excluding common unwanted patterns.
@@ -476,8 +453,7 @@ def extract_text_with_links(node: Tag) -> str:
         return ""
 
     parts = []
-    # seen_lines = set()
-
+    
     # Process block-level tags to avoid duplication
     if node.name in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "pre", "code"]:
         for a in node.find_all("a", href=True):
@@ -500,13 +476,6 @@ def extract_text_with_links(node: Tag) -> str:
         
         return "\n".join(parts)
 
-        # text = " ".join(node.stripped_strings)
-        # text = re.sub(r"\s+", " ", text).strip()
-        # if text and text not in seen_lines:
-        #     seen_lines.add(text)
-        #     parts.append(text)
-
-        # Non-block container → recurse
     for child in node.children:
         if isinstance(child, Tag):
             txt = extract_text_with_links(child)
@@ -520,21 +489,6 @@ def extract_text_with_links(node: Tag) -> str:
                     parts.append(clean)
 
     return "\n".join(parts)
-    # for child in node.children:
-    #     if isinstance(child, Tag):
-    #         parts.append(extract_text_with_links(child))
-    #         for a in child.find_all("a", href=True):
-    #             href = a["href"].strip()
-    #             if is_valid_link(href) and href not in unique_links:
-    #                 unique_links.add(href)
-    #                 parts.append(href)
-    #     elif hasattr(child, "string") and child.string:
-    #         clean = clean_text(str(child))
-    #         if clean:
-    #             parts.append(clean)
-
-    # return "\n".join([p for p in parts if p]).strip()
-
 
 # ----------------------------
 # Joomla & Cloudflare email decoding
@@ -633,17 +587,6 @@ def extract_content(html: str, base_url: str) -> dict:
 
     title = clean_text(soup.title.get_text()) if soup.title else ""
 
-    # Cloudflare obfuscated emails
-    # cf_emails = []
-    # for tag in soup.select("[data-cfemail]"):
-    #     try:
-    #         email = decode_cloudflare_email(tag.get("data-cfemail"))
-    #     except Exception:
-    #         email = None
-    #     if email:
-    #         cf_emails.append(email)
-
-    # mailto: links
     mailto_emails = []
     for a in soup.find_all("a", href=True):
         try:
@@ -654,15 +597,6 @@ def extract_content(html: str, base_url: str) -> dict:
             mail = href.split("mailto:", 1)[1].split("?")[0]
             if mail:
                 mailto_emails.append(mail)
-
-    # # Joomla hidden emails
-    # joomla_emails = []
-    # for tag in soup.find_all("joomla-hidden-mail"):
-    #     j_mail = decode_joomla_email(tag)
-    #     if j_mail:
-    #         joomla_emails.append(j_mail)
-
-    # emails = sorted(set(cf_emails + mailto_emails + joomla_emails))
 
     emails = sorted(set(mailto_emails))
 
@@ -855,10 +789,7 @@ def crawl(driver, start_url: str):
                 wait_for_ready(driver)
                 html = driver.page_source
 
-                # --------------------------------------
-                # 🔹 NEW: Pagination link extraction
-                # --------------------------------------
-                
+                # Pagination link extraction
                 pagination_links = extract_pagination_links(url, html)
                 for plink in pagination_links:
                     norm_plink = normalize_url(url, plink)
@@ -885,7 +816,6 @@ def crawl(driver, start_url: str):
                     "out_links": data["links"],
                     "external_profile_links": data["external_profile_links"],
                 }
-                # if "?start=" not in url and "?view=" not in url and "&view=" not in url:
                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 pages_crawled += 1
                 print(f"[{pages_crawled}] {url} (links: {len(data['links'])}, emails: {len(data['emails'])})")
@@ -915,158 +845,6 @@ def crawl(driver, start_url: str):
 
     print(f"\nDone. Saved {pages_crawled} pages to {OUTPUT_JSONL}")
 
-# def is_pdf(url: str) -> bool:
-#     return ".pdf" in url.lower()
-
-
-# def crawl(driver, start_url: str):
-#     parsed = urlparse(start_url)
-#     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-#     rp = robotparser.RobotFileParser()
-
-#     try:
-#         rp.set_url(robots_url)
-#         rp.read()
-#     except Exception:
-#         pass
-
-#     seen = set()
-#     q = deque()
-#     q.append((start_url, 0))
-
-#     for link in MUST_CRAWL:
-#         q.append((link, 0))
-
-#     out_f = open(OUTPUT_JSONL, "w", encoding="utf-8")
-#     pages_crawled = 0
-
-#     try:
-#         while q and pages_crawled < MAX_PAGES:
-#             url, depth = q.popleft()
-#             norm_url = remove_prefix(url)
-
-#             if norm_url in seen:
-#                 continue
-#             seen.add(norm_url)
-
-#             if depth > MAX_DEPTH:
-#                 continue
-#             if not is_internal(url):
-#                 continue
-
-#             if not allowed_by_robots(url, rp):
-#                 print(f"[robots.txt] Skipping: {url}")
-#                 continue
-
-#             try:
-#                 time.sleep(REQUEST_DELAY)
-
-#                 # =====================================================
-#                 # 🔹 UNIFIED DATA STRUCTURE
-#                 # =====================================================
-#                 data = {
-#                     "title": "",
-#                     "text": "",
-#                     "emails": [],
-#                     "anchor_texts": [],
-#                     "links": [],
-#                     "external_profile_links": [],
-#                 }
-
-#                 html = None
-
-#                 # =====================================================
-#                 # 🔹 FETCH CONTENT (PDF or HTML)
-#                 # =====================================================
-#                 if is_pdf(url):
-#                     print(f"[PDF] Processing: {url}")
-#                     data["text"] = extract_pdf_text(url) or ""
-
-#                 else:
-#                     load_cookies(driver)
-#                     driver.get(url)
-#                     wait_for_ready(driver)
-
-#                     title = driver.title.lower()
-#                     if "this page isn’t working" in title:
-#                         print(f"[Skipping redirect error] {url}")
-#                         continue
-
-#                     html = driver.page_source
-
-#                     # Extract structured content
-#                     extracted = extract_content(html, url)
-#                     data.update(extracted)
-
-#                 # =====================================================
-#                 # 🔹 VALIDATION (COMMON)
-#                 # =====================================================
-#                 if not data["text"] or looks_like_error_page(data["text"]):
-#                     print(f"[Skipping bad content] {url}")
-#                     continue
-
-#                 if any(param in url for param in EXCLUDE_PARAMS):
-#                     print(f"[Skipping filtered URL] {url}")
-#                     continue
-
-#                 # =====================================================
-#                 # 🔹 PAGINATION + LINK DISCOVERY (HTML ONLY)
-#                 # =====================================================
-#                 if html:
-#                     pagination_links = extract_pagination_links(url, html)
-#                     for plink in pagination_links:
-#                         norm_plink = normalize_url(url, plink)
-#                         if not norm_plink:
-#                             continue
-
-#                         if not is_pdf(norm_plink) and any(param in norm_plink for param in EXCLUDE_PARAMS):
-#                             continue
-
-#                         if norm_plink not in seen:
-#                             q.append((norm_plink, depth))
-
-#                     for link in data["links"]:
-#                         if link.lower().endswith(IMAGE_EXTENSIONS):
-#                             continue
-#                         if should_skip_url(link):
-#                             continue
-#                         if not is_pdf(link) and any(param in link for param in EXCLUDE_PARAMS):
-#                             continue
-#                         if link not in seen:
-#                             q.append((link, depth + 1))
-
-#                 # =====================================================
-#                 # 🔹 SINGLE RECORD + SINGLE WRITE
-#                 # =====================================================
-#                 record = {
-#                     "url": url,
-#                     "depth": depth,
-#                     "title": data["title"],
-#                     "text": data["text"],
-#                     "emails": data["emails"],
-#                     "anchor_texts": data["anchor_texts"],
-#                     "out_links": data["links"],
-#                     "external_profile_links": data["external_profile_links"],
-#                 }
-
-#                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
-#                 pages_crawled += 1
-
-#                 print(f"[{pages_crawled}] {url}")
-
-#             except (TimeoutException, WebDriverException) as e:
-#                 print(f"[ERROR] {url}: {e}")
-#                 continue
-#             except Exception as e:
-#                 print(f"[UNEXPECTED ERROR] {url}: {e}")
-#                 continue
-
-#     finally:
-#         out_f.close()
-#         driver.quit()
-
-#     print(f"\nDone. Saved {pages_crawled} pages to {OUTPUT_JSONL}")
-
 
 if __name__ == "__main__":
     chrome_options = Options()
@@ -1088,15 +866,13 @@ if __name__ == "__main__":
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+    
     try:
-
         # Login first
         perform_login(driver, LOGIN_URL1)
         if is_logged_in_heuristic(driver):
-            input("After you have logged in successfully, press Enter to continue...")
+            input("After you have manually logged in successfully, press Enter to continue...")
             print("[Login] CAS and sc.fsu.edu login successful ✅")
-
-
             
         # Crawl using logged-in session
         crawl(driver, START_URL)
