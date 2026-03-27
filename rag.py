@@ -35,6 +35,7 @@ import warnings
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# LangSmith for tracing every LLM call
 
 # from dotenv import load_dotenv
 # from langsmith import traceable
@@ -55,6 +56,7 @@ NEW_FILE = "new.jsonl"
 OLD_FILE = "old.jsonl"
 CHROMA_NEW_DIR = "./chroma_new"
 CHROMA_OLD_DIR = "./chroma_old"
+KEYWORDS_FILE = "clean_keywords.txt"
 
 
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -67,7 +69,7 @@ CHUNK_OVERLAP = 0
 ALLOWED_META_TYPES = (str, int, float, bool, type(None))
 
 # =========================================================
-# Utilities (cleaning, dates, metadata)
+# Pre-Processing the data (cleaning, dates, metadata)
 # =========================================================
 
 def clean_text_block(text: str) -> str:
@@ -229,7 +231,7 @@ def sanitize_metadata(d: Document) -> Document:
     return Document(page_content=d.page_content, metadata=force_metadata(md))
 
 # =========================================================
-# Loader
+# Document Loader
 # =========================================================
 
 def load_jsonl(path: str) -> List[Document]:
@@ -243,6 +245,7 @@ def load_jsonl(path: str) -> List[Document]:
             url = rec.get("url", "") or ""
 
             # Skip URLs with pagination or view parameters
+            # Because of repeated data or no text is found or got a error page
             if (
                 "?start=" in url
                 or "?view=" in url
@@ -255,6 +258,7 @@ def load_jsonl(path: str) -> List[Document]:
             if not text:
                 continue
 
+            # Storing the metadata
             md = {
                 "source": rec.get("url", ""),
                 "title": rec.get("title", ""),
@@ -300,7 +304,6 @@ def format_chunks(docs: list):
 # Build Vector Store Retrievers & Cross-Encoder Reranker
 # =========================================================
 
-
 def build_retriever(jsonl_file: str, persist_dir: str):
     docs = load_jsonl(os.path.join(DATA_DIR, jsonl_file))
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
@@ -334,10 +337,8 @@ new_retriever, new_vs, new_reranker = build_retriever(NEW_FILE, CHROMA_NEW_DIR)
 old_retriever, old_vs, old_reranker = build_retriever(OLD_FILE, CHROMA_OLD_DIR)
 
 # =========================================================
-# Keyword Vector Store (for spelling corrections)
+# Building the Keyword Vector Store (for spelling corrections)
 # =========================================================
-
-KEYWORDS_FILE = "clean_keywords.txt"
 
 def load_keyword_documents(path: str) -> List[Document]:
     """
@@ -390,56 +391,17 @@ def _keyword_matches(question: str) -> str:
     return ", ".join(keywords)
 
 # =========================================================
-# LLM + Prompts
+# LLM + Main QA Prompt Chain
 # =========================================================
 
+# Setting up the Cache
 set_llm_cache(SQLiteCache(database_path="./langchain_cache.db"))
 
+# Loading the Ollama model
 llm = OllamaLLM(model=OLLAMA_MODEL)
 
 
-# qa_prompt = PromptTemplate(
-#     input_variables=["context", "question", "today"],
-#     template="""
-# You are a Helpful AI assistant. Answer the question **strictly using the given context**. 
-
-# The context consists of multiple chunks of text, each with a date indicating when the information was relevant.
-# Each chunk may mention multiple people or events — focus **only** on the person or topic directly asked about.
-
-# Today's date is: {today}
-
-# Your goal is to provide the most **recent and accurate** information available.
-
-# Instructions:
-# 1. Review all provided chunks carefully.
-# 2. Prefer chunks with newer dates (more recent events or updates).
-# 3. Prioritize information that directly matches the question subject.
-# 4. If the information is outdated or uncertain, clearly mention that.
-# 5. If asked about a person, include some additional relevant details.
-# 6. Never include information about unrelated people or topics.
-# 7. If no relevant information is found,  respond **Only** with: "I could not find any relevant information about your question."
-
-
-# Question:
-# {question}
-
-# Context:
-# {context}
-
-# Guidelines:
-# - Give the final answer based on the most recent chunk(s).
-# - Do not merge unrelated or outdated information.
-# - If unsure, state the uncertainty instead of guessing.
-# - Do NOT infer, guess, or combine information across chunks.
-# - Answer only using the context above.
-# - Use **Markdown** for all answers, using tables, bullet points, and sections as appropriate.
-# - Be concise and factual, and focused only on the query subject.
-# """
-# )
-
-# If multiple chunks mention the same fact:
-# - Use the information from the most recent date only.
-
+# Main RAG Prompt and Chain which makes the final answer using the retrieved documents
 qa_prompt = PromptTemplate(
     input_variables=["context", "question"],
     template="""
@@ -483,8 +445,6 @@ Output format:
 - Otherwise, use a short factual paragraph
 """
 )
-# - Do NOT mention sources, URLs, documents, or chunk metadata.
-
 qa_chain = LLMChain(llm=llm, prompt=qa_prompt)
 
 combine_chain = StuffDocumentsChain(
@@ -495,6 +455,12 @@ combine_chain = StuffDocumentsChain(
 # -------------------------------------
 # Question Reformulation Prompt
 # -------------------------------------
+
+# This Prompt tackles 3 main issues and generates a final improved question for better retrieval accuracy.
+# 1. Loading the chat_history(most recent 3 chats) to form a question understandable to the model using previously asked questions for better retrieval accuracy.
+# 2. Date integration in the prompt to determine the current semester in the user question along with the year for retrieval with appropriate dates and semesters.
+# 3. Spelling correction in the user question using the keywords extracted from the data.
+
 condense_prompt = PromptTemplate(
     input_variables=["chat_history", "question", "today"],
     template="""
@@ -523,7 +489,7 @@ Only Then you MAY rewrite them into explicit, Semester using the year and month 
             
 - A "semester" is defined as:
     Spring semester: January to April
-    Summer semester: June to July
+    Summer semester: May to July
     Fall semester: August to December
 
 - Do NOT guess semester names (Spring/Fall).
@@ -554,6 +520,9 @@ Standalone question:"""
 # LLM chain for reformulating the question
 question_generator = LLMChain(llm=llm, prompt=condense_prompt)
 
+# ========================================================
+# Fall Back to LLM without RAG - Prompt
+# ========================================================
 
 fallback_prompt = PromptTemplate(
     input_variables=["question"],
@@ -582,7 +551,7 @@ Answer:
 fallback_chain = LLMChain(llm=llm, prompt=fallback_prompt)
 
 # =========================================================
-# LangGraph State
+# Declaring the LangGraph State
 # =========================================================
 
 class RAGState(TypedDict):
@@ -593,8 +562,10 @@ class RAGState(TypedDict):
     keywords: str
 
 # =========================================================
-# Nodes
+# Stating the Nodes for the Graph
 # =========================================================
+
+# @tracable used only when tracing calls using LangSmith
 
 # @traceable(name="Reformulate Question")
 def reformulate_node(state: RAGState):
@@ -653,7 +624,7 @@ def fallback_llm_node(state: RAGState):
     return {"answer": result["text"].strip()}
 
 # =========================================================
-# Build Graph
+# Build Graph using nodes and edges
 # =========================================================
 
 graph = StateGraph(RAGState)
@@ -670,7 +641,7 @@ graph.add_node("fallback_llm", fallback_llm_node)
 graph.set_entry_point("reformulate")
 graph.add_edge("reformulate", "retrieve_new")
 graph.add_edge("retrieve_new", "answer_new")
-# Conditional edges after new answer
+# Conditional edges after new answer to route LLM to another node if the LLM fails to find relavant docs
 def next_after_answer_new(state):
     answer = state.get("answer", "").lower()
     if "could not find any relevant information" in answer or "could not find any information" in answer:
@@ -678,6 +649,7 @@ def next_after_answer_new(state):
     return END
 graph.add_conditional_edges("answer_new", next_after_answer_new)
 graph.add_edge("retrieve_old", "answer_old")
+
 def next_after_answer_old(state):
     answer = state.get("answer", "").lower()
     if "could not find any relevant information" in answer or "could not find any information" in answer:
@@ -685,4 +657,5 @@ def next_after_answer_old(state):
     return END
 graph.add_conditional_edges("answer_old", next_after_answer_old)
 graph.add_edge("fallback_llm", END)
+
 app = graph.compile()
