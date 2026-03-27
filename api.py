@@ -1,4 +1,7 @@
-# fastapi_rag_stream.py
+# -------------------------
+# Imports
+# -------------------------
+
 import asyncio
 import traceback
 from fastapi import FastAPI, HTTPException, Header
@@ -27,16 +30,13 @@ api.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS","*"],  # allow POST, OPTIONS, GET, etc.
     allow_headers=["*"],
 )
+
 # -------------------------------
 # Request Schema
 # -------------------------------
 
 class Query(BaseModel):
     question: str
-
-# -------------------------------
-# FastAPI Setup
-# -------------------------------
 
 chat_histories: dict[str, List[dict]] = {}
 
@@ -62,7 +62,7 @@ async def chat_stream(query: Query, x_session_id: str = Header(...)):
             # Run the graph
             result = await app.ainvoke({
                 "question": query.question,
-                "chat_history": last_three, #/////////////
+                "chat_history": last_three,
                 })  # or app.invoke(...) if sync
 
             # Send standalone question
@@ -80,7 +80,7 @@ async def chat_stream(query: Query, x_session_id: str = Header(...)):
 
             # Send question reformulation prompt
             condense_prompt_text = question_generator.prompt.format(
-                chat_history=last_three, #///////////
+                chat_history=last_three,
                 question=query.question,
                 today=date.today().isoformat(),
                 keywords = result.get("keywords", "")
