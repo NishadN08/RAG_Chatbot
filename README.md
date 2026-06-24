@@ -24,7 +24,6 @@ An interactive **Retrieval-Augmented Generation (RAG)** chatbot that answers que
 - [Running the Chatbot API (`api.py`)](#running-the-chatbot-api-apipy)
 - [API Reference](#api-reference)
 - [Configuration Reference](#configuration-reference)
-- [Notes, Caveats & Known Issues](#notes-caveats--known-issues)
 - [Tech Stack](#tech-stack)
 
 ---
@@ -41,7 +40,6 @@ An interactive **Retrieval-Augmented Generation (RAG)** chatbot that answers que
 | `rag.py` | Core RAG logic: data cleaning, Chroma vector stores, cross-encoder reranking, prompts, and the LangGraph pipeline (`app`). |
 | `api.py` | FastAPI app that wraps `rag.py` and exposes a streaming chat endpoint. |
 | `requirements.txt` | Python dependencies. |
-| `__pycache__/` | Compiled Python bytecode (auto-generated, safe to ignore/delete). |
 
 ---
 
@@ -51,8 +49,8 @@ An interactive **Retrieval-Augmented Generation (RAG)** chatbot that answers que
 
 ```
 reformulate → retrieve_new → answer_new ──(no answer found)──► retrieve_old → answer_old ──(no answer found)──► fallback_llm → END
-      │                            │                                              │
-      └─(answer found)──────────► END                          └─(answer found)──► END
+                                │                                                  |                    
+                                └─(answer found)──────────► END                    └─(answer found)──► END
 ```
 
 1. **`reformulate`** — Rewrites the user's latest question into a standalone question using the last 3 turns of chat history, today's date (to resolve "this semester" → e.g. "Fall 2026"), and fuzzy keyword matches from the keyword vector store (spelling correction).
@@ -153,15 +151,6 @@ What happens:
 - The script loads documents from the files listed in `JSON_FILES` and uses a local Ollama model (`OLLAMA_MODEL = "llama3.1:8b"`) to extract searchable keywords (faculty names, research areas, course codes, software, labs, organizations, etc.) in batches of `DOCS_PER_BATCH = 5` documents at a time.
 - Extracted keywords are cleaned (numbering/markdown stripped, sentences discarded, deduplicated) and written one per line to `OUTPUT_FILE`.
 
-> ⚠️ **Important — check the filenames before running:** as shipped, `keywords_gen.py` defaults to:
-> ```python
-> JSON_FILES = ["new1.jsonl", "old1.jsonl"]
-> OUTPUT_FILE = "clean_keywords1.txt"
-> ```
-> but `rag.py` expects the keyword file to be named **`clean_keywords.txt`** and the corpora to be **`new.jsonl`** / **`old.jsonl`** (see `KEYWORDS_FILE`, `NEW_FILE`, `OLD_FILE` in `rag.py`). Before running this script, either:
-> - edit `JSON_FILES = ["new.jsonl", "old.jsonl"]` and `OUTPUT_FILE = "clean_keywords.txt"` at the top of `keywords_gen.py`, **or**
-> - run it as-is and then rename the output file to `clean_keywords.txt` (and point `JSON_FILES` at your real `new.jsonl`/`old.jsonl` from Step 2).
-
 The resulting `clean_keywords.txt` is loaded into its own small Chroma vector store inside `rag.py` and is used during the **question reformulation** step to fuzzy-match / spell-correct names and terms the user typed (e.g. correcting a misspelled faculty name or course code before retrieval runs).
 
 ---
@@ -183,8 +172,6 @@ This will:
    - Sets up a SQLite LLM cache (`langchain_cache.db`).
    - Compiles the LangGraph pipeline.
 2. Start a **uvicorn** server on `0.0.0.0:8000`.
-
-You should see `[DEBUG]` log lines confirming how many documents/chunks were loaded for each corpus, followed by uvicorn's startup banner.
 
 Alternatively, you can run it directly with uvicorn:
 
@@ -277,27 +264,6 @@ Key constants you may want to tune, all near the top of their respective files:
 | `ALLOWED_PATH_PREFIXES` / `MUST_CRAWL` | see file | Scope of the crawl. |
 | `MAX_PAGES` / `MAX_DEPTH` | `5000` / `20` | Crawl limits. |
 | `HEADLESS` / `WAIT_FOR_MANUAL_LOGIN` | `False` / `True` | Manual CAS/Duo login support. |
-
-**`keywords_gen.py`**
-
-| Constant | Default | Description |
-|---|---|---|
-| `JSON_FILES` | `["new1.jsonl", "old1.jsonl"]` | ⚠️ Update to match `new.jsonl`/`old.jsonl` from Step 2. |
-| `OUTPUT_FILE` | `clean_keywords1.txt` | ⚠️ Update to `clean_keywords.txt` to match `rag.py`. |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Keyword-extraction model. |
-| `DOCS_PER_BATCH` | `5` | Documents per LLM call. |
-
----
-
-## Notes, Caveats & Known Issues
-
-- **Vector stores rebuild on every startup.** `rag.py` deletes and recreates `./chroma_new`, `./chroma_old`, and `./chroma_keywords` each time it's imported, so the first request after starting `api.py` will be slower while embeddings are computed.
-- **`api.py` uses a module-level `chat_histories` dict** that is read/written inside `chat_stream()` but isn't defined or imported anywhere in `api.py` itself. If you hit a `NameError: chat_histories` when calling `/chat/stream`, add `chat_histories: dict = {}` near the top of `api.py`.
-- **Filename mismatch between `keywords_gen.py` and `rag.py`.** As shipped, `keywords_gen.py` reads `new1.jsonl`/`old1.jsonl` and writes `clean_keywords1.txt`, while `rag.py` expects `new.jsonl`/`old.jsonl`/`clean_keywords.txt`. See [Step 3](#step-3--generate-the-spellingkeyword-dictionary-with-keywords_genpy) above.
-- **CORS is wide open** (`allow_origins` includes `"*"`). Tighten this in `api.py` before deploying publicly.
-- **Crawling requires a real FSU CAS login** and manual interaction (Duo 2FA); it cannot be fully automated as shipped.
-- **Pinned dependency versions matter** — `rag.py` relies on the `langchain-classic` package split (`LLMChain`, `StuffDocumentsChain`, `ContextualCompressionRetriever`, etc.), so install exactly what's in `requirements.txt` rather than the latest LangChain release.
-- No `LICENSE` file is currently included in this repository.
 
 ---
 
